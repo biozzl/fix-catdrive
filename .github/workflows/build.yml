@@ -1,0 +1,18 @@
+name: Merge Firmware
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run Merge Script
+        run: python merge.py
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: mixed-firmware
+          path: mixed.bin
