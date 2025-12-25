@@ -1,18 +1,22 @@
-name: Merge Firmware
+name: Build and Verify Firmware
 
 on: [push]
 
 jobs:
-  build:
+  build_and_check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Merge Script
+      - name: 1. 合并固件 (Merge)
         run: python merge.py
 
-      - name: Upload Artifact
+      - name: 2. 安全校验 (Verify)
+        run: python verify.py
+
+      - name: 3. 上传成品 (Upload)
+        if: success()  # 只有校验通过才会上传
         uses: actions/upload-artifact@v4
         with:
-          name: mixed-firmware
+          name: catdrive-secure-firmware
           path: mixed.bin
