@@ -1,22 +1,25 @@
-name: Build and Verify Firmware
+name: Fix Catdrive Firmware
 
-on: [push]
+on: 
+  workflow_dispatch: # 允许你手动点击按钮运行
 
 jobs:
-  build_and_check:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
-      - name: 1. 合并固件 (Merge)
-        run: python merge.py
-
-      - name: 2. 安全校验 (Verify)
-        run: python verify.py
-
-      - name: 3. 上传成品 (Upload)
-        if: success()  # 只有校验通过才会上传
-        uses: actions/upload-artifact@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          name: catdrive-secure-firmware
-          path: mixed.bin
+          python-version: '3.x'
+
+      - name: Run Fix Script
+        run: python fix_firmware.py
+
+      - name: Upload Fixed Firmware
+        uses: actions/upload-artifact@v3
+        with:
+          name: Fixed-Firmware
+          path: fixed_old.bin
