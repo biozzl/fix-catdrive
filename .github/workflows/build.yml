@@ -1,26 +1,26 @@
-name: Fix Catdrive Firmware
+name: Unlock Firmware
 
 on: 
-  workflow_dispatch: 
+  workflow_dispatch: # 允许手动点击按钮触发
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4  # 这里也是 v4，最新版
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5 # Python 环境也是较新的 v5
         with:
           python-version: '3.x'
 
-      - name: Run Fix Script
-        run: python fix_firmware.py
+      - name: Run Key Fix Script
+        run: python key_fix.py
 
-      - name: Upload Fixed Firmware
-        uses: actions/upload-artifact@v4
+      - name: Upload Unlocked Firmware
+        uses: actions/upload-artifact@v4 # 【重点】这里是 v4，不会报错
         with:
-          name: Fixed-Firmware
-          path: fixed_old.bin
-          compression-level: 9
+          name: Unlocked-Firmware
+          path: unlocked_623.bin 
+          compression-level: 0
