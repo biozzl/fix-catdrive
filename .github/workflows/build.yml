@@ -1,17 +1,17 @@
 name: Unlock Firmware
 
 on: 
-  workflow_dispatch: # 允许手动点击按钮触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4  # 这里也是 v4，最新版
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5 # Python 环境也是较新的 v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
@@ -19,8 +19,9 @@ jobs:
         run: python key_fix.py
 
       - name: Upload Unlocked Firmware
-        uses: actions/upload-artifact@v4 # 【重点】这里是 v4，不会报错
+        uses: actions/upload-artifact@v4
         with:
           name: Unlocked-Firmware
-          path: unlocked_623.bin 
+          # 这里必须改成 safe 版的文件名，否则你会下载失败！
+          path: unlocked_623_safe.bin 
           compression-level: 0
