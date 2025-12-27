@@ -1,0 +1,31 @@
+name: Decompile and Scan
+
+on: 
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Capstone Disassembler
+        run: |
+          pip install capstone
+
+      - name: Run Decompile Scan
+        run: |
+          python decompile_scan.py > scan_result.txt
+          cat scan_result.txt
+
+      - name: Upload Result
+        uses: actions/upload-artifact@v4
+        with:
+          name: Scan-Result
+          path: scan_result.txt
