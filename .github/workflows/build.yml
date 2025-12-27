@@ -1,4 +1,4 @@
-name: Build Hybrid Firmware
+name: Run Custom Identity Script
 
 on: 
   workflow_dispatch: # 允许手动点击按钮触发
@@ -23,12 +23,12 @@ jobs:
 
       - name: Run Hybrid Script
         # 运行你刚才上传的拼接脚本
-        run: python hybrid_ultimate.py
+        run: python custom_identity.py
 
       - name: Upload Hybrid Firmware
         uses: actions/upload-artifact@v4
         with:
           name: Hybrid-Ultimate-Firmware
           # 这里必须和你脚本里生成的 OUTPUT 文件名一致
-          path: hybrid_ultimate.bin 
+          path: hybrid_custom_mac_sn.bin 
           compression-level: 0
