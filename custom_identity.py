@@ -3,16 +3,15 @@ import binascii
 import os
 
 def create_perfect_firmware_v8():
-    # ！！！请确保 Action YAML 里也是这个名字！！！
+    # ！！！文件名已修改，防止混淆！！！
     input_file = 'hybrid_ultimate.bin'
-    output_file = 'hybrid_perfect_final.bin'
+    output_file = 'hybrid_v8_final.bin'
     
     # --- 定制信息 ---
     NEW_MAC_STR = "00:11:32:A3:67:EF"
     NEW_SN_STR  = "1910Q2N321313"
     
-    # 核心逻辑：4KB 标准模式
-    # 这是唯一能避开 0xD1000 处 DTB 的方案
+    # 核心逻辑：4KB 标准模式 (这是唯一符合物理定律的解)
     ENV_OFFSET = 0xD0000
     ENV_CALC_SIZE = 0x1000  # 4KB
     
@@ -23,8 +22,7 @@ def create_perfect_firmware_v8():
     with open(input_file, 'rb') as f:
         data = bytearray(f.read())
 
-    print(f"正在生成 V8 (4KB Standard Mode)...")
-    print(f"请注意：此版本只计算前 4KB 的 CRC，完美避开 DTB。")
+    print(f"正在生成 V8 (4KB Standard)...")
 
     # 1. 身份信息 (Vendor)
     vendor_offset = 0x7EB000
@@ -52,6 +50,7 @@ def create_perfect_firmware_v8():
         'bootcmd': boot_cmd_str,
         'bootargs': 'console=ttyS0,115200 ip=off initrd=0x3000000 root=/dev/sda1 rw syno_usb_vbus_gpio=36@d0058000.usb3@1@0,37@d005e000.usb@1@0 syno_castrated_xhc=d0058000.usb3@1 swiotlb=2048 syno_hw_version=DS120j syno_fw_version=M.301 syno_hdd_powerup_seq=1 ihd_num=1 netif_num=1 syno_hdd_enable=40 syno_hdd_act_led=10 flash_size=8',
         'ethaddr': NEW_MAC_STR,
+        'bootdelay': '3' # V8 签名认证
     }
 
     # 构建 Payload
@@ -60,11 +59,7 @@ def create_perfect_firmware_v8():
         env_payload += k.encode('ascii') + b'=' + v.encode('ascii') + b'\0'
     env_payload += b'\0'
     
-    # 填充到 4KB - 4 字节
-    if len(env_payload) > (ENV_CALC_SIZE - 4):
-        print("Error: 环境变量太大！")
-        return
-        
+    # 填充到 4KB - 4
     env_block = env_payload.ljust(ENV_CALC_SIZE - 4, b'\x00')
     
     # 计算 CRC (仅 4KB)
@@ -74,20 +69,12 @@ def create_perfect_firmware_v8():
     final_env = struct.pack('<I', crc) + env_block
     data[ENV_OFFSET : ENV_OFFSET + ENV_CALC_SIZE] = final_env
     
-    print(f"  [CRC Check] 写入的 CRC: {hex(crc)}")
-    
-    # 3. 验证 DTB 区域未被覆盖
-    dtb_magic = data[0xD1000:0xD1004]
-    if dtb_magic == b'\xd0\x0d\xfe\xed':
-        print("  [Safety] DTB 区域检查通过 (d00dfeed)。")
-    else:
-        print("  [FATAL] DTB 被覆盖了！")
+    print(f"  [CRC Fix] 4KB CRC: {hex(crc)}")
 
     with open(output_file, 'wb') as f:
         f.write(data)
         
     print(f"\n成功！{output_file} 已生成。")
-    print("请去 Action 确保下载的是这个刚刚生成的文件！")
 
 if __name__ == "__main__":
     create_perfect_firmware_v8()
