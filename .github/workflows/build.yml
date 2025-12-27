@@ -1,7 +1,7 @@
-name: Unlock Firmware
+name: Build Hybrid Firmware
 
 on: 
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动点击按钮触发
 
 jobs:
   build:
@@ -15,13 +15,20 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Run Key Fix Script
-        run: python key_fix.py
+      - name: Check Files
+        run: |
+          ls -l
+          if [ ! -f "old.bin" ]; then echo "Error: old.bin not found!"; exit 1; fi
+          if [ ! -f "623.8.1.bin" ]; then echo "Error: 623.8.1.bin not found!"; exit 1; fi
 
-      - name: Upload Unlocked Firmware
+      - name: Run Hybrid Script
+        # 运行你刚才上传的拼接脚本
+        run: python hybrid_ultimate.py
+
+      - name: Upload Hybrid Firmware
         uses: actions/upload-artifact@v4
         with:
-          name: Unlocked-Firmware
-          # 这里必须改成 safe 版的文件名，否则你会下载失败！
-          path: magic_623.bin 
+          name: Hybrid-Ultimate-Firmware
+          # 这里必须和你脚本里生成的 OUTPUT 文件名一致
+          path: hybrid_ultimate.bin 
           compression-level: 0
