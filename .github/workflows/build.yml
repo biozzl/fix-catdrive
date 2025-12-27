@@ -23,5 +23,5 @@ jobs:
         with:
           name: Unlocked-Firmware
           # 这里必须改成 safe 版的文件名，否则你会下载失败！
-          path: final_fixed_623.bin 
+          path: magic_623.bin 
           compression-level: 0
