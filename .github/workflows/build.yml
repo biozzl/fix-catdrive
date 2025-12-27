@@ -18,17 +18,19 @@ jobs:
       - name: Check Files
         run: |
           ls -l
-          if [ ! -f "old.bin" ]; then echo "Error: old.bin not found!"; exit 1; fi
-          if [ ! -f "623.8.1.bin" ]; then echo "Error: 623.8.1.bin not found!"; exit 1; fi
+          # --- 修正点：检查 V8 脚本需要的原料 ---
+          if [ ! -f "hybrid_ultimate.bin" ]; then echo "Error: hybrid_ultimate.bin not found! Please upload it."; exit 1; fi
+          # 检查脚本是否存在
+          if [ ! -f "custom_identity.py" ]; then echo "Error: custom_identity.py not found!"; exit 1; fi
 
       - name: Run Hybrid Script
-        # 运行你刚才上传的拼接脚本
+        # 运行 V8 脚本
         run: python custom_identity.py
 
       - name: Upload Hybrid Firmware
         uses: actions/upload-artifact@v4
         with:
-          name: Hybrid-Ultimate-Firmware
-          # 这里必须和你脚本里生成的 OUTPUT 文件名一致
+          name: Hybrid-V8-Final
+          # --- 关键点：这里必须和 V8 脚本里的 output_file 一致 ---
           path: hybrid_v8_final.bin 
           compression-level: 0
