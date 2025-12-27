@@ -1,111 +1,117 @@
 import sys
 import struct
 
-# 尝试导入 capstone，如果 Action 环境里安装成功的话
 try:
     from capstone import *
     from capstone.arm64 import *
     HAS_CAPSTONE = True
 except ImportError:
-    print("CRITICAL: Capstone library not found. Please install it.")
+    print("CRITICAL: Capstone not installed.")
     HAS_CAPSTONE = False
 
-def scan_firmware():
+def scan_firmware_v2():
     filename = '623.8.1.bin'
     
     with open(filename, 'rb') as f:
         code = f.read()
 
-    # 1. 定位错误字符串
-    # 這是 "SF: key fail..." 的 hex 模式
-    error_str = b'SF: key fail'
-    str_offset = code.find(error_str)
+    # 1. 寻找标准锚点字符串 "SF: Detected"
+    # 这是 U-Boot 原生代码，编译器通常会生成标准的引用指令，比较好抓
+    anchor_str = b'SF: Detected'
+    anchor_offset = code.find(anchor_str)
     
-    if str_offset == -1:
-        print("Error: 找不到错误字符串")
+    if anchor_offset == -1:
+        print("Error: 找不到标准字符串 anchor")
         return
 
-    print(f"[*] 目标字符串 'SF: key fail...' 位于文件偏移: {hex(str_offset)}")
+    print(f"[*] 锚点字符串 'SF: Detected...' 位于: {hex(anchor_offset)}")
 
     if not HAS_CAPSTONE:
         return
 
-    # 2. 初始化反汇编引擎 (ARM64 Little Endian)
     md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
-    md.detail = True # 需要详细操作数信息
+    md.detail = True
 
-    print("[*] 正在全文件扫描引用该字符串的代码...")
+    print("[*] 正在扫描引用锚点的代码 (反向追踪)...")
     
-    # 我们扫描代码段 (假设前 1MB 包含代码)
-    # 为了速度，我们只解析指令流
-    # ARM64 指令是 4 字节对齐
-    
+    # 扫描整个代码段 (前 1MB)
     found_refs = []
-
-    # 这里的 0x0 是基地址。U-Boot 通常重定位，但 ADR 指令是相对的，所以我们假设 Base=0 分析相对偏移即可
-    # 扫描范围：0 到 字符串出现的位置
-    scan_limit = min(len(code), str_offset)
     
-    # 这是一个比较耗时的操作，我们以 4KB 为块进行反汇编
-    for chunk_start in range(0, scan_limit, 0x1000):
-        chunk_end = min(chunk_start + 0x1000, scan_limit)
-        chunk_data = code[chunk_start:chunk_end]
+    # 优化扫描：同时寻找 ADR (相对) 和 LDR (加载文字池)
+    # 遍历所有 4 字节对齐的地址
+    limit = min(len(code), 0xC0000) # 只扫前 768KB
+    
+    for addr in range(0, limit, 4):
+        # 读 4 字节指令
+        raw = code[addr:addr+4]
+        insn_val = struct.unpack('<I', raw)[0]
         
-        for insn in md.disasm(chunk_data, chunk_start):
-            # 检查指令是否是 ADR 或 ADRP
-            # 我们寻找加载 str_offset 地址的指令
+        # --- 检查 1: ADR 指令 ---
+        # 100xxxxx ...
+        if (insn_val & 0x1F000000) == 0x10000000:
+            # 手动解码 ADR 偏移
+            immlo = (insn_val >> 29) & 0x3
+            immhi = (insn_val >> 5) & 0x7FFFF
+            imm = (immhi << 2) | immlo
+            if imm & 0x100000: imm -= 0x200000 # Sign extend
             
-            # 逻辑 1: ADR Xd, #offset
-            if insn.id == ARM64_INS_ADR:
-                # 计算目标地址
-                op = insn.operands[1] # 第二个操作数是立即数偏移
-                target_addr = op.imm
-                
-                # 如果指向了我们的字符串 (允许 32 字节误差，可能指向字符串中间或头部)
-                if abs(target_addr - str_offset) < 32:
-                    print(f"\n[!] 发现直接引用 (ADR) 在偏移: {hex(insn.address)}")
-                    print(f"    指令: {insn.mnemonic} {insn.op_str}")
-                    found_refs.append(insn.address)
+            target = addr + imm
+            # 如果指向了锚点附近 (允许 64 字节误差)
+            if abs(target - anchor_offset) < 64:
+                print(f"[!] 发现 ADR 引用在: {hex(addr)} -> 指向 {hex(target)}")
+                found_refs.append(addr)
 
-            # 逻辑 2: ADRP + ADD 组合 (这是大范围寻址常用的)
-            # 这是一个简化的扫描，因为 ADRP 和 ADD 可能不相邻。
-            # 但通常编译器会把它们放在一起。
-            elif insn.id == ARM64_INS_ADRP:
-                op = insn.operands[1]
-                page_base = op.imm
-                # 检查这个 Page 是否包含我们的字符串
-                if (page_base <= str_offset) and (str_offset < page_base + 0x1000):
-                    # 这是一个潜在的引用，记录下来，看后面有没有 ADD
-                    pass
+        # --- 检查 2: LDR (Literal) 指令 ---
+        # 00011000 ... (LDR Xd, label)
+        elif (insn_val & 0xFF000000) == 0x58000000:
+            imm19 = (insn_val >> 5) & 0x7FFFF
+            offset = imm19 << 2
+            # Sign extend
+            if offset & 0x100000: offset -= 0x200000
+            
+            target = addr + offset
+            # 检查目标地址内存里存放的是不是 anchor_offset
+            # LDR 加载的是一个地址值，这个地址值指向字符串
+            if 0 <= target < len(code) - 8:
+                # 读取内存里的值
+                ptr_val = struct.unpack('<Q', code[target:target+8])[0]
+                # U-Boot 会重定位，但在静态文件里，它可能是一个相对小的偏移，或者绝对地址
+                # 这是一个难点，如果 Base 不为 0。
+                # 但我们可以试着检查 ptr_val 是否等于 anchor_offset (假设 Base=0)
+                if abs(ptr_val - anchor_offset) < 64:
+                    print(f"[!] 发现 LDR 引用在: {hex(addr)} -> 加载值 {hex(ptr_val)}")
+                    found_refs.append(addr)
 
-    # 3. 深度分析引用点周围的代码
+    # 3. 打印关键代码段
     if found_refs:
-        for ref_addr in found_refs:
-            analyze_context(code, md, ref_addr)
+        print("\n" + "="*80)
+        print("!!! 捕捉到关键嫌疑代码 !!!")
+        print("请把下面这些指令完整发给我！我们要找的破解点就在这里面！")
+        print("="*80)
+        
+        # 我们取第一个发现的引用点，往上倒推 200 字节
+        # 因为 Key Check 肯定在 Detect 之前执行
+        ref = found_refs[0]
+        start = max(0, ref - 256)
+        end = min(len(code), ref + 64)
+        
+        snippet = code[start:end]
+        
+        print(f"{'Addr':<10} {'Machine Code':<24} {'Assembly'}")
+        print("-" * 60)
+        
+        for insn in md.disasm(snippet, start):
+            # 标记引用点
+            marker = " <=== 标准检测逻辑" if insn.address == ref else ""
+            
+            # 简单着色: 这里的 B.NE, TBZ 等跳转指令是重点
+            if insn.mnemonic.startswith('b') or insn.mnemonic.startswith('c') or insn.mnemonic.startswith('t'):
+                 marker += " [Check?]"
+            
+            bytes_str = ' '.join([f'{b:02x}' for b in insn.bytes])
+            print(f"{hex(insn.address):<10} {bytes_str:<24} {insn.mnemonic:<10} {insn.op_str:<20}{marker}")
     else:
-        print("[-] 未发现直接 ADR 引用。尝试暴力搜索 BL (调用) 模式...")
-        # 如果找不到 ADR，可能是因为代码先把偏移加载到寄存器再跳转
-        # 或者我们直接找 "B.NE" (不相等则跳转) 或 "TBZ" (测试位为0跳转) 
-        # 这些指令通常在报错代码的前面
-
-def analyze_context(code, md, hit_addr):
-    print(f"\n[+] 分析偏移 {hex(hit_addr)} 周围的逻辑 (关键！):")
-    
-    # 提取命中点前后 128 字节的代码
-    start = max(0, hit_addr - 64)
-    end = min(len(code), hit_addr + 64)
-    snippet = code[start:end]
-    
-    print("-" * 60)
-    print(f"{'Offset':<10} {'Bytes':<20} {'Instruction':<30}")
-    print("-" * 60)
-    
-    for insn in md.disasm(snippet, start):
-        bytes_str = ' '.join([f'{b:02x}' for b in insn.bytes])
-        marker = "<-- 引用点" if insn.address == hit_addr else ""
-        print(f"{hex(insn.address):<10} {bytes_str:<20} {insn.mnemonic:<10} {insn.op_str:<20} {marker}")
-    print("-" * 60)
-    print("请把上面这段 Log 发给我，重点是引用点上面的 B.NE, B.EQ, CBZ, CBNZ 指令。")
+        print("[-] 依然没找到直接引用... 厂家可能用了非常复杂的代码混淆。")
 
 if __name__ == "__main__":
-    scan_firmware()
+    scan_firmware_v2()
