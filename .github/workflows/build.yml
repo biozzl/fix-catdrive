@@ -30,5 +30,5 @@ jobs:
         with:
           name: Hybrid-Ultimate-Firmware
           # 这里必须和你脚本里生成的 OUTPUT 文件名一致
-          path: hybrid_perfect_final.bin 
+          path: hybrid_v8_final.bin 
           compression-level: 0
