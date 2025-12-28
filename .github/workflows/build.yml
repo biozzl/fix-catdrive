@@ -1,4 +1,4 @@
-name: Patch Catdrive Ultimate Fix (Safe Mode)
+name: Patch Catdrive Ultimate Fix (LZMA Safe Mode)
 
 on: [push, workflow_dispatch]
 
@@ -18,7 +18,6 @@ jobs:
         run: |
           if [ ! -f "623.8.1.bin" ]; then echo "Error: 623.8.1.bin missing"; exit 1; fi
           if [ ! -f "hybrid_custom_mac_sn.bin" ]; then echo "Error: hybrid_custom_mac_sn.bin missing"; exit 1; fi
-          echo "Files verified. Starting surgery..."
 
       - name: Run Ultimate Patch Script
         run: |
@@ -30,12 +29,12 @@ jobs:
           # --- 文件配置 ---
           SRC_BIN = '623.8.1.bin'
           DST_BIN = 'hybrid_custom_mac_sn.bin'
-          OUT_BIN = 'hybrid_ultimate_fix_safe.bin' # 改个名区分
+          OUT_BIN = 'hybrid_ultimate_fix_safe.bin'
           
-          # 关键修正：Env 大小必须限制在 0x5000 (20KB)
-          # 0xD0000 (Env Start) -> 0xD5000 (Kernel Start)
+          # 限制 Env 大小为 20KB (0x5000)
+          # 0xD0000 (Env) + 0x5000 = 0xD5000 (Kernel)
           DST_ENV_OFFSET = 0xD0000
-          DST_ENV_SIZE = 0x5000  # 20KB (千万不能用 64KB!)
+          DST_ENV_SIZE = 0x5000 
 
           # --- 核心移植数据 ---
           PAYLOAD_PREBOOT = b'i2c dev 0; i2c probe 46; if test $? = 0; then echo FOUND_0x46; i2c mw 0x46 0x34 0; fi'
@@ -86,7 +85,6 @@ jobs:
           
           new_env_data = b'\0'.join(new_env_list) + b'\0\0'
           
-          # 填充 0x00 至 20KB
           padding_len = (DST_ENV_SIZE - 4) - len(new_env_data)
           if padding_len < 0:
               print(f'ERROR: Env overflow! Size: {len(new_env_data)} > Max: {DST_ENV_SIZE-4}')
@@ -101,14 +99,17 @@ jobs:
           dst_data[DST_ENV_OFFSET : DST_ENV_OFFSET+4] = struct.pack('<I', new_crc)
           dst_data[DST_ENV_OFFSET+4 : DST_ENV_OFFSET+DST_ENV_SIZE] = final_payload
 
-          # 关键检查：确保没有碰到内核 (0xD5000)
+          # --- 关键检查 (修正版) ---
           print('Verifying Kernel Integrity...')
           kernel_magic = dst_data[0xD5000:0xD5004].hex()
-          if kernel_magic != '27051956':
-             print(f'FATAL ERROR: Kernel Header Corrupted! Found {kernel_magic}')
+          print(f'Kernel Header found: {kernel_magic}')
+          
+          # 允许 27051956 (uImage) 或 5d000080 (LZMA)
+          if kernel_magic != '27051956' and kernel_magic != '5d000080':
+             print(f'FATAL ERROR: Kernel Header Unknown/Corrupted! Found {kernel_magic}')
              sys.exit(1)
           else:
-             print('PASSED: Kernel Header is intact.')
+             print('✅ PASSED: Kernel Header is valid and intact.')
 
           with open(OUT_BIN, 'wb') as f:
               f.write(dst_data)
