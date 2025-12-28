@@ -1,4 +1,4 @@
-name: Patch Catdrive U-Boot Env
+name: Patch Catdrive Ultimate Fix
 
 on: [push, workflow_dispatch]
 
@@ -14,55 +14,39 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Verify Files Exist
+      - name: Verify Files
         run: |
-          if [ ! -f "623.8.1.bin" ]; then echo "Error: 623.8.1.bin not found!"; exit 1; fi
-          if [ ! -f "hybrid_custom_mac_sn.bin" ]; then echo "Error: hybrid_custom_mac_sn.bin not found!"; exit 1; fi
-          echo "Files found. Proceeding..."
+          if [ ! -f "623.8.1.bin" ]; then echo "Error: 623.8.1.bin missing"; exit 1; fi
+          if [ ! -f "hybrid_custom_mac_sn.bin" ]; then echo "Error: hybrid_custom_mac_sn.bin missing"; exit 1; fi
+          echo "Files verified. Starting surgery..."
 
-      - name: Run Patch Script
+      - name: Run Ultimate Patch Script
         run: |
           python3 -c "
           import struct
           import zlib
           import sys
 
-          # --- 配置 ---
-          SRC_BIN = '623.8.1.bin'       # 源文件
-          DST_BIN = 'hybrid_custom_mac_sn.bin' # 目标文件
-          OUT_BIN = 'hybrid_fixed_0x46.bin'
+          # --- 文件配置 ---
+          SRC_BIN = '623.8.1.bin'       # 提供逻辑的供体
+          DST_BIN = 'hybrid_custom_mac_sn.bin' # 接受移植的受体
+          OUT_BIN = 'hybrid_ultimate_fix.bin'  # 最终产物
           
-          # 目标文件(Hybrid)的标准Env参数 (这个是固定的不要动)
+          # Hybrid 固件的标准 Env 参数
           DST_ENV_OFFSET = 0xD0000
-          DST_ENV_SIZE = 0x10000  # 64KB
+          DST_ENV_SIZE = 0x10000 # 64KB
 
-          def find_logic_in_source(filename):
-              print(f'Scanning {filename} for hardware logic...')
-              with open(filename, 'rb') as f:
-                  data = f.read()
-              
-              # 智能搜索特征码: 'preboot=i2c dev 0'
-              # 这行代码是 0x46 机器特有的标志
-              signature = b'preboot=i2c dev 0'
-              idx = data.find(signature)
-              
-              if idx == -1:
-                  return None
-              
-              # 找到开头后，一直读取到下一个 null 字节 (\x00)
-              end_idx = data.find(b'\x00', idx)
-              if end_idx == -1:
-                  full_str = data[idx:]
-              else:
-                  full_str = data[idx:end_idx]
-              
-              print(f'Found Logic at offset {hex(idx)}: {full_str}')
-              
-              # 提取值 (去掉 'preboot=')
-              if b'=' in full_str:
-                  return full_str.split(b'=', 1)[1]
-              return None
+          # --- 核心移植数据 (硬编码自 623 分析结果) ---
+          
+          # 1. preboot: 针对 0x46 的探测与断电修复
+          # 这是从 623 中提取的原始逻辑
+          PAYLOAD_PREBOOT = b'i2c dev 0; i2c probe 46; if test $? = 0; then echo FOUND_0x46; i2c mw 0x46 0x34 0; fi'
 
+          # 2. bootcmd 补丁: 启动内核前的 I2C 初始化序列
+          # 这一串指令来自 623 的 bootcmd，必须插在 booti 之前
+          PAYLOAD_I2C_INIT = b'i2c mw 0x45 0x33 0x72; i2c mw 0x45 0x3d 0x66; i2c mw 0x45 0x3e 0x66; i2c mw 0x45 0x34 0x00; i2c mw 0x45 0x36 0xff; '
+
+          # --- 工具函数 ---
           def extract_env_vars(data, offset, size):
               # 跳过前4字节CRC
               raw_env = data[offset+4 : offset+size]
@@ -70,7 +54,7 @@ jobs:
               current_str = b''
               for byte in raw_env:
                   if byte == 0:
-                      if not current_str: break # 双null结束
+                      if not current_str: break
                       if b'=' in current_str:
                           key, val = current_str.split(b'=', 1)
                           vars_dict[key] = val
@@ -79,48 +63,60 @@ jobs:
                       current_str += bytes([byte])
               return vars_dict
 
-          # 1. 从源文件中智能搜寻逻辑
-          target_logic = find_logic_in_source(SRC_BIN)
-          
-          if not target_logic:
-              # 如果搜不到，说明 623 文件可能不对，但为了救你，我内置了这段代码作为保底
-              print('WARNING: Could not find logic in source file! Using hardcoded fallback.')
-              target_logic = b'i2c dev 0; i2c probe 46; if test $? = 0; then i2c mw 0x46 0x34 0; fi'
-          
-          print(f'Using Logic Payload: {target_logic}')
-
-          # 2. 读取目标文件 (Hybrid)
+          # --- 主程序 ---
           print(f'Reading Target: {DST_BIN}')
           with open(DST_BIN, 'rb') as f:
               dst_data = bytearray(f.read())
 
-          # 3. 解析目标文件的环境变量
+          # 1. 解析目标环境变量
+          print('Parsing environment variables...')
           dst_vars = extract_env_vars(dst_data, DST_ENV_OFFSET, DST_ENV_SIZE)
-          
-          # 4. 植入/覆盖 preboot
-          print('Transplanting logic to Target...')
-          dst_vars[b'preboot'] = target_logic
 
-          # 5. 重新打包环境变量
+          # 2. 移植 preboot
+          print(f'Injecting preboot logic...')
+          dst_vars[b'preboot'] = PAYLOAD_PREBOOT
+
+          # 3. 移植 bootcmd 中的 I2C 初始化
+          if b'bootcmd' in dst_vars:
+              orig_cmd = dst_vars[b'bootcmd']
+              print(f'Original bootcmd: {orig_cmd}')
+              
+              # 关键逻辑: 在 'booti' 命令之前插入 I2C 初始化
+              if b'booti' in orig_cmd:
+                  parts = orig_cmd.split(b'booti')
+                  # 拼接: [前半部分] + [I2C补丁] + booti + [后半部分]
+                  new_cmd = parts[0] + PAYLOAD_I2C_INIT + b'booti' + parts[1]
+                  print(f'Patched bootcmd: {new_cmd}')
+                  dst_vars[b'bootcmd'] = new_cmd
+              else:
+                  print('WARNING: booti not found in bootcmd! Appending logic to start.')
+                  dst_vars[b'bootcmd'] = PAYLOAD_I2C_INIT + orig_cmd
+          else:
+              print('ERROR: bootcmd not found in target binary!')
+              sys.exit(1)
+
+          # 4. 重新打包
+          print('Repacking environment block...')
           new_env_list = []
           for k, v in dst_vars.items():
               new_env_list.append(k + b'=' + v)
           
+          # 连接所有变量，结尾补双 null
           new_env_data = b'\0'.join(new_env_list) + b'\0\0'
           
-          # 填充 0x00
+          # 填充 0x00 至 64KB
           padding_len = (DST_ENV_SIZE - 4) - len(new_env_data)
           if padding_len < 0:
-              print('ERROR: Environment size overflow! Too much data.')
+              print(f'ERROR: Environment size overflow! Exceeded by {abs(padding_len)} bytes.')
               sys.exit(1)
           
           final_payload = new_env_data + (b'\0' * padding_len)
 
-          # 6. 计算新的 CRC32 (至关重要)
+          # 5. 计算并写入 CRC32 (防止变砖)
           new_crc = zlib.crc32(final_payload) & 0xffffffff
           print(f'New CRC32: {hex(new_crc)}')
 
-          # 7. 写入文件
+          # 写入文件
           dst_data[DST_ENV_OFFSET : DST_ENV_OFFSET+4] = struct.pack('<I', new_crc)
           dst_data[DST_ENV_OFFSET+4 : DST_ENV_OFFSET+DST_ENV_SIZE] = final_payload
 
@@ -132,5 +128,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: patched-firmware
-          path: hybrid_fixed_0x46.bin
+          name: hybrid_ultimate_fix
+          path: hybrid_ultimate_fix.bin
