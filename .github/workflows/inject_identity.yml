@@ -33,6 +33,7 @@ jobs:
           echo "✅ 底包就绪，准备生产..."
 
       - name: Run Injection Script
+        id: run_script  # <--- 【关键修复】就是加了这一行！
         env:
           INPUT_MAC: ${{ github.event.inputs.mac_address }}
           INPUT_SN: ${{ github.event.inputs.sn_number }}
@@ -45,7 +46,7 @@ jobs:
 
           # --- 配置 ---
           BASE_BIN = 'hybrid_ultimate_fix_safe.bin'
-          # 使用 MAC 地址最后4位作为文件名后缀，方便区分
+          # 使用 MAC 地址最后4位作为文件名后缀
           mac_suffix = os.environ['INPUT_MAC'].replace(':', '')[-4:]
           OUT_BIN = f'catdrive_patch_{mac_suffix}.bin'
           
@@ -59,7 +60,6 @@ jobs:
           print(f'🏭 正在生产固件...')
           print(f'   底包: {BASE_BIN}')
           print(f'   目标 MAC: {target_mac}')
-          print(f'   目标 SN : {target_sn}')
 
           # 1. 读取底包
           with open(BASE_BIN, 'rb') as f:
@@ -82,13 +82,10 @@ jobs:
                   current_str += bytes([byte])
 
           # 4. 修改身份信息
-          # 强制写入新 MAC
           env_dict[b'ethaddr'] = target_mac.encode('utf-8')
           
-          # 如果有 SN 就写入，没有就保持原样或不做处理
           if target_sn:
               env_dict[b'sn'] = target_sn.encode('utf-8')
-              # 有些固件也用 serialnet，顺手加上兼容性更好
               env_dict[b'serialnet'] = target_sn.encode('utf-8')
 
           # 5. 重新打包
@@ -96,13 +93,11 @@ jobs:
           for k, v in env_dict.items():
               new_env_list.append(k + b'=' + v)
           
-          # 拼接并以双null结尾
           new_env_data = b'\0'.join(new_env_list) + b'\0\0'
           
-          # 填充 0x00
           padding_len = (ENV_SIZE - 4) - len(new_env_data)
           if padding_len < 0:
-              print(f'❌ 错误: 环境变量数据过长，溢出 {abs(padding_len)} 字节！')
+              print(f'❌ 错误: 环境变量溢出！')
               sys.exit(1)
           
           final_payload = new_env_data + (b'\0' * padding_len)
@@ -121,7 +116,7 @@ jobs:
           
           print(f'🎉 固件生成成功: {OUT_BIN}')
           
-          # 将文件名写入 GITHUB_OUTPUT 方便后续上传步骤使用
+          # 写入 output 变量
           with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
               fh.write(f'filename={OUT_BIN}\n')
           "
@@ -129,5 +124,6 @@ jobs:
       - name: Upload Custom Firmware
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.run_script.outputs.filename }}  # 动态命名
+          # 现在这里能正确引用到上一步的 filename 了
+          name: ${{ steps.run_script.outputs.filename }}
           path: catdrive_patch_*.bin
