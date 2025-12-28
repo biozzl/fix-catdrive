@@ -1,4 +1,4 @@
-name: CatDrive Identity Factory (Native)
+name: CatDrive Identity Factory (Native V7)
 
 on:
   workflow_dispatch:
@@ -43,43 +43,44 @@ jobs:
           import sys
           import os
 
-          # --- 校验算法 ---
+          # --- 校验算法 (严格遵循 Excel 和 原厂结构) ---
           def calc_mac_checksum_byte(mac_hex_str):
               # 输入: '001132A367EF'
-              # 输出: 整数 (例如 0x3C)
+              # 算法: 字节累加，取低8位 (Sum & 0xFF)
               clean = mac_hex_str.replace(':', '')
               total = 0
               for i in range(0, len(clean), 2):
                   total += int(clean[i:i+2], 16)
-              # 算法: Sum & 0xFF (取低8位)
               return total & 0xFF
 
           def calc_sn_checksum_dec(sn_str):
               # 输入: '1910Q2N321313'
-              # 输出: 字符串 (例如 '713')
+              # 算法: ASCII 码累加，转为十进制字符串
               total = 0
               for char in sn_str:
                   total += ord(char)
               return str(total)
 
-          # --- 配置 ---
+          # --- 基础配置 ---
           BASE_BIN = 'hybrid_ultimate_fix_safe.bin'
           
+          # 文件名生成
           mac_input = os.environ.get('INPUT_MAC', '').strip().replace(':', '')
           mac_suffix = mac_input[-4:] if len(mac_input) >=4 else 'xxxx'
           OUT_BIN = f'catdrive_patch_{mac_suffix}.bin'
           
-          # 关键地址
+          # 关键内存地址 (绝对物理地址)
           ENV_OFFSET = 0xD0000
           ENV_SIZE = 0x5000
-          HIDDEN_MAC_OFFSET = 0x7EB000
-          HIDDEN_SN_OFFSET  = 0x7EB020
+          HIDDEN_MAC_OFFSET = 0x7EB000 # 隐形 MAC 区
+          HIDDEN_SN_OFFSET  = 0x7EB020 # 隐形 SN 区
           KERNEL_OFFSET = 0xD5000
 
+          # 获取输入 (强制转大写)
           target_mac = os.environ.get('INPUT_MAC', '').strip().upper()
           target_sn = os.environ.get('INPUT_SN', '').strip().upper()
 
-          print(f'🏭 启动固件生产线 (Native Format)...')
+          print(f'🏭 启动固件生产线 (Native Format V7)...')
           print(f'   MAC: {target_mac}')
           print(f'   SN : {target_sn}')
 
@@ -87,25 +88,26 @@ jobs:
               data = bytearray(f.read())
 
           if len(data) != 8388608:
-              print('❌ 错误: 底包大小不对！')
+              print('❌ 致命错误: 底包大小不对！')
               sys.exit(1)
 
-          # ==========================================
-          # 任务 1: 写入隐形 MAC 区 (二进制 + 校验)
-          # ==========================================
-          print(f'🔧 修改隐形 MAC 区 ({hex(HIDDEN_MAC_OFFSET)})...')
+          # =========================================================
+          # 任务 1: 写入隐形 MAC 区 (0x7EB000) - 之前的脚本漏了这里!
+          # =========================================================
+          print(f'🔧 [隐形区] 修改 MAC ({hex(HIDDEN_MAC_OFFSET)})...')
           
-          # 1. 准备 MAC 字节
           mac_clean = target_mac.replace(':', '')
           if len(mac_clean) != 12:
-              print('❌ 错误: MAC 地址长度不对')
+              print('❌ 错误: MAC 地址长度不对，必须是 12 位 Hex')
               sys.exit(1)
               
+          # 1. 转换 MAC 为二进制
           mac_bytes = bytes.fromhex(mac_clean)
           
-          # 2. 计算校验码 (单字节整数)
+          # 2. 计算 1 字节校验码
           mac_chk = calc_mac_checksum_byte(mac_clean)
-          print(f'   MAC Checksum: {hex(mac_chk)}')
+          print(f'   MAC Hex: {mac_clean}')
+          print(f'   MAC Chk: {hex(mac_chk)} (Sum & 0xFF)')
           
           # 3. 写入: [MAC 6bytes] + [CheckSum 1byte]
           for i in range(6):
@@ -113,38 +115,41 @@ jobs:
           
           data[HIDDEN_MAC_OFFSET + 6] = mac_chk
           
-          # 清理后面可能的残留 (虽然通常是0)
+          # 清理第 8 个字节 (保持干净)
           data[HIDDEN_MAC_OFFSET + 7] = 0
           print('   ✅ 隐形 MAC + 校验码 写入完成。')
 
-          # ==========================================
-          # 任务 2: 写入隐形 SN 区 (字符串 + 十进制校验)
-          # ==========================================
-          print(f'🔧 修改隐形 SN 区 ({hex(HIDDEN_SN_OFFSET)})...')
+          # =========================================================
+          # 任务 2: 写入隐形 SN 区 (0x7EB020) - 之前只是擦除，现在要写入!
+          # =========================================================
+          print(f'🔧 [隐形区] 修改 SN ({hex(HIDDEN_SN_OFFSET)})...')
           
           # 1. 计算校验码 (十进制字符串)
           sn_chk_str = calc_sn_checksum_dec(target_sn)
-          print(f'   SN Checksum (Dec): {sn_chk_str}')
+          print(f'   SN ASCII Sum: {sn_chk_str}')
           
-          # 2. 构造字符串: SN={SN},CHK={DEC}
-          # 注意：底包原本是 ,CHK=713。为了兼容，我们使用 ,CHK={DEC}
+          # 2. 构造原厂格式字符串: SN={SN},CHK={DEC}
+          # 例如: SN=2130S6RBBTCAG,CHK=850
           new_hidden_sn = f'SN={target_sn},CHK={sn_chk_str}'
           new_sn_bytes = new_hidden_sn.encode('utf-8')
           
-          print(f'   写入字串: {new_hidden_sn}')
+          print(f'   构造字串: {new_hidden_sn}')
           
-          # 3. 写入覆盖
+          # 3. 写入并覆盖
+          # 先清空该区域 48 字节 (防止残留)
+          for i in range(48):
+              data[HIDDEN_SN_OFFSET + i] = 0
+              
+          # 写入新数据
           for i, b in enumerate(new_sn_bytes):
               data[HIDDEN_SN_OFFSET + i] = b
           
-          # 截断
-          data[HIDDEN_SN_OFFSET + len(new_sn_bytes)] = 0
           print('   ✅ 隐形 SN + 校验码 写入完成。')
 
-          # ==========================================
-          # 任务 3: 修改 U-Boot 环境变量
-          # ==========================================
-          print('🔧 修改 U-Boot 环境变量...')
+          # =========================================================
+          # 任务 3: 修改 U-Boot 环境变量 (0xD0000)
+          # =========================================================
+          print('🔧 [U-Boot] 修改环境变量...')
           raw_env = data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE]
           env_dict = {}
           current_str = b''
@@ -158,17 +163,21 @@ jobs:
               else:
                   current_str += bytes([byte])
 
+          # 写入标准 Env 变量
           env_dict[b'ethaddr'] = target_mac.encode('utf-8')
           env_dict[b'sn'] = target_sn.encode('utf-8')
-          # 移除旧的 serialnet 防止干扰
+          
+          # 移除 serialnet，保持唯一性
           if b'serialnet' in env_dict:
               del env_dict[b'serialnet']
 
+          # 重打包
           new_env_list = []
           for k, v in env_dict.items():
               new_env_list.append(k + b'=' + v)
           new_env_data = b'\0'.join(new_env_list) + b'\0\0'
           
+          # 溢出检查
           padding_len = (ENV_SIZE - 4) - len(new_env_data)
           if padding_len < 0:
               print(f'❌ 错误: 环境变量溢出！')
@@ -180,10 +189,15 @@ jobs:
           data[ENV_OFFSET : ENV_OFFSET+4] = struct.pack('<I', new_crc)
           data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE] = final_payload
 
-          # 安全检查
-          if data[KERNEL_OFFSET:KERNEL_OFFSET+4].hex() not in ['5d000080', '27051956']:
-               print('❌ 错误: 内核头损坏')
+          # =========================================================
+          # 任务 4: 最终内核安全检查
+          # =========================================================
+          kernel_magic = data[KERNEL_OFFSET:KERNEL_OFFSET+4].hex()
+          if kernel_magic != '5d000080' and kernel_magic != '27051956':
+               print(f'❌ 错误: 内核头损坏 ({kernel_magic})')
                sys.exit(1)
+          else:
+               print('✅ 内核完整性验证通过。')
 
           with open(OUT_BIN, 'wb') as f:
               f.write(data)
