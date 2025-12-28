@@ -1,4 +1,4 @@
-name: Patch Catdrive Ultimate Fix
+name: Patch Catdrive Ultimate Fix (Safe Mode)
 
 on: [push, workflow_dispatch]
 
@@ -28,27 +28,20 @@ jobs:
           import sys
 
           # --- 文件配置 ---
-          SRC_BIN = '623.8.1.bin'       # 提供逻辑的供体
-          DST_BIN = 'hybrid_custom_mac_sn.bin' # 接受移植的受体
-          OUT_BIN = 'hybrid_ultimate_fix.bin'  # 最终产物
+          SRC_BIN = '623.8.1.bin'
+          DST_BIN = 'hybrid_custom_mac_sn.bin'
+          OUT_BIN = 'hybrid_ultimate_fix_safe.bin' # 改个名区分
           
-          # Hybrid 固件的标准 Env 参数
+          # 关键修正：Env 大小必须限制在 0x5000 (20KB)
+          # 0xD0000 (Env Start) -> 0xD5000 (Kernel Start)
           DST_ENV_OFFSET = 0xD0000
-          DST_ENV_SIZE = 0x10000 # 64KB
+          DST_ENV_SIZE = 0x5000  # 20KB (千万不能用 64KB!)
 
-          # --- 核心移植数据 (硬编码自 623 分析结果) ---
-          
-          # 1. preboot: 针对 0x46 的探测与断电修复
-          # 这是从 623 中提取的原始逻辑
+          # --- 核心移植数据 ---
           PAYLOAD_PREBOOT = b'i2c dev 0; i2c probe 46; if test $? = 0; then echo FOUND_0x46; i2c mw 0x46 0x34 0; fi'
-
-          # 2. bootcmd 补丁: 启动内核前的 I2C 初始化序列
-          # 这一串指令来自 623 的 bootcmd，必须插在 booti 之前
           PAYLOAD_I2C_INIT = b'i2c mw 0x45 0x33 0x72; i2c mw 0x45 0x3d 0x66; i2c mw 0x45 0x3e 0x66; i2c mw 0x45 0x34 0x00; i2c mw 0x45 0x36 0xff; '
 
-          # --- 工具函数 ---
           def extract_env_vars(data, offset, size):
-              # 跳过前4字节CRC
               raw_env = data[offset+4 : offset+size]
               vars_dict = {}
               current_str = b''
@@ -63,62 +56,59 @@ jobs:
                       current_str += bytes([byte])
               return vars_dict
 
-          # --- 主程序 ---
           print(f'Reading Target: {DST_BIN}')
           with open(DST_BIN, 'rb') as f:
               dst_data = bytearray(f.read())
 
-          # 1. 解析目标环境变量
           print('Parsing environment variables...')
           dst_vars = extract_env_vars(dst_data, DST_ENV_OFFSET, DST_ENV_SIZE)
 
-          # 2. 移植 preboot
           print(f'Injecting preboot logic...')
           dst_vars[b'preboot'] = PAYLOAD_PREBOOT
 
-          # 3. 移植 bootcmd 中的 I2C 初始化
           if b'bootcmd' in dst_vars:
               orig_cmd = dst_vars[b'bootcmd']
-              print(f'Original bootcmd: {orig_cmd}')
-              
-              # 关键逻辑: 在 'booti' 命令之前插入 I2C 初始化
               if b'booti' in orig_cmd:
                   parts = orig_cmd.split(b'booti')
-                  # 拼接: [前半部分] + [I2C补丁] + booti + [后半部分]
                   new_cmd = parts[0] + PAYLOAD_I2C_INIT + b'booti' + parts[1]
                   print(f'Patched bootcmd: {new_cmd}')
                   dst_vars[b'bootcmd'] = new_cmd
               else:
-                  print('WARNING: booti not found in bootcmd! Appending logic to start.')
                   dst_vars[b'bootcmd'] = PAYLOAD_I2C_INIT + orig_cmd
           else:
-              print('ERROR: bootcmd not found in target binary!')
+              print('ERROR: bootcmd not found!')
               sys.exit(1)
 
-          # 4. 重新打包
-          print('Repacking environment block...')
+          # 重打包
           new_env_list = []
           for k, v in dst_vars.items():
               new_env_list.append(k + b'=' + v)
           
-          # 连接所有变量，结尾补双 null
           new_env_data = b'\0'.join(new_env_list) + b'\0\0'
           
-          # 填充 0x00 至 64KB
+          # 填充 0x00 至 20KB
           padding_len = (DST_ENV_SIZE - 4) - len(new_env_data)
           if padding_len < 0:
-              print(f'ERROR: Environment size overflow! Exceeded by {abs(padding_len)} bytes.')
+              print(f'ERROR: Env overflow! Size: {len(new_env_data)} > Max: {DST_ENV_SIZE-4}')
               sys.exit(1)
           
           final_payload = new_env_data + (b'\0' * padding_len)
 
-          # 5. 计算并写入 CRC32 (防止变砖)
           new_crc = zlib.crc32(final_payload) & 0xffffffff
           print(f'New CRC32: {hex(new_crc)}')
 
           # 写入文件
           dst_data[DST_ENV_OFFSET : DST_ENV_OFFSET+4] = struct.pack('<I', new_crc)
           dst_data[DST_ENV_OFFSET+4 : DST_ENV_OFFSET+DST_ENV_SIZE] = final_payload
+
+          # 关键检查：确保没有碰到内核 (0xD5000)
+          print('Verifying Kernel Integrity...')
+          kernel_magic = dst_data[0xD5000:0xD5004].hex()
+          if kernel_magic != '27051956':
+             print(f'FATAL ERROR: Kernel Header Corrupted! Found {kernel_magic}')
+             sys.exit(1)
+          else:
+             print('PASSED: Kernel Header is intact.')
 
           with open(OUT_BIN, 'wb') as f:
               f.write(dst_data)
@@ -128,5 +118,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hybrid_ultimate_fix
-          path: hybrid_ultimate_fix.bin
+          name: hybrid_ultimate_fix_safe
+          path: hybrid_ultimate_fix_safe.bin
