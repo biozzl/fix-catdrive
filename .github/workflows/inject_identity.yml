@@ -1,4 +1,4 @@
-name: CatDrive Identity Factory (Deep Clean)
+name: CatDrive Identity Factory (Native)
 
 on:
   workflow_dispatch:
@@ -8,8 +8,8 @@ on:
         required: true
         default: '00:11:32:XX:XX:XX'
       sn_number:
-        description: '输入目标 SN 序列号 (自动大写)'
-        required: false
+        description: '输入目标 SN 序列号 (13位，自动大写)'
+        required: true
         default: ''
 
 jobs:
@@ -30,10 +30,9 @@ jobs:
             echo "❌ 错误: 仓库根目录下找不到底包 hybrid_ultimate_fix_safe.bin"
             exit 1
           fi
-          echo "✅ 底包就绪，准备生产..."
 
       - name: Run Injection Script
-        id: run_script  # 关键ID，确保Artifact上传正常
+        id: run_script
         env:
           INPUT_MAC: ${{ github.event.inputs.mac_address }}
           INPUT_SN: ${{ github.event.inputs.sn_number }}
@@ -44,57 +43,109 @@ jobs:
           import sys
           import os
 
-          # --- 核心配置 ---
+          # --- 校验算法 ---
+          def calc_mac_checksum_byte(mac_hex_str):
+              # 输入: '001132A367EF'
+              # 输出: 整数 (例如 0x3C)
+              clean = mac_hex_str.replace(':', '')
+              total = 0
+              for i in range(0, len(clean), 2):
+                  total += int(clean[i:i+2], 16)
+              # 算法: Sum & 0xFF (取低8位)
+              return total & 0xFF
+
+          def calc_sn_checksum_dec(sn_str):
+              # 输入: '1910Q2N321313'
+              # 输出: 字符串 (例如 '713')
+              total = 0
+              for char in sn_str:
+                  total += ord(char)
+              return str(total)
+
+          # --- 配置 ---
           BASE_BIN = 'hybrid_ultimate_fix_safe.bin'
           
-          # 文件名生成逻辑
           mac_input = os.environ.get('INPUT_MAC', '').strip().replace(':', '')
           mac_suffix = mac_input[-4:] if len(mac_input) >=4 else 'xxxx'
           OUT_BIN = f'catdrive_patch_{mac_suffix}.bin'
           
-          # 内存布局常量 (绝对不能错)
+          # 关键地址
           ENV_OFFSET = 0xD0000
-          ENV_SIZE = 0x5000        # 20KB (严格限制)
-          KERNEL_OFFSET = 0xD5000  # 内核绝对起始位置
-          
-          # 隐藏 SN 的位置 (基于 hybrid_custom_mac_sn.bin 扫描结果)
-          HIDDEN_SN_OFFSET = 0x7eb020
-          
-          # 获取输入并转大写
+          ENV_SIZE = 0x5000
+          HIDDEN_MAC_OFFSET = 0x7EB000
+          HIDDEN_SN_OFFSET  = 0x7EB020
+          KERNEL_OFFSET = 0xD5000
+
           target_mac = os.environ.get('INPUT_MAC', '').strip().upper()
           target_sn = os.environ.get('INPUT_SN', '').strip().upper()
 
-          print(f'🏭 启动固件生产线...')
-          print(f'   底包: {BASE_BIN}')
-          print(f'   目标 MAC: {target_mac}')
-          print(f'   目标 SN : {target_sn}')
+          print(f'🏭 启动固件生产线 (Native Format)...')
+          print(f'   MAC: {target_mac}')
+          print(f'   SN : {target_sn}')
 
-          # 1. 读取底包
           with open(BASE_BIN, 'rb') as f:
               data = bytearray(f.read())
 
-          # --- 安全检查 1: 底包完整性 ---
           if len(data) != 8388608:
-              print('❌ 致命错误: 底包大小不是 8MB！停止操作。')
+              print('❌ 错误: 底包大小不对！')
               sys.exit(1)
 
-          # --- 步骤 2: 清理隐藏的旧 SN ---
-          print(f'🧹 正在检查隐藏区域 ({hex(HIDDEN_SN_OFFSET)})...')
-          # 读取该位置的前3个字节
-          signature = data[HIDDEN_SN_OFFSET:HIDDEN_SN_OFFSET+3]
+          # ==========================================
+          # 任务 1: 写入隐形 MAC 区 (二进制 + 校验)
+          # ==========================================
+          print(f'🔧 修改隐形 MAC 区 ({hex(HIDDEN_MAC_OFFSET)})...')
           
-          if signature == b'SN=' or signature == b'sn=':
-              # 找到特征码，执行擦除 (擦除16字节，足够覆盖 1910Q2N321313)
-              for i in range(16):
-                  data[HIDDEN_SN_OFFSET + i] = 0
-              print('   ✅ 发现旧 SN，已执行物理擦除 (Zero-out)。')
-          else:
-              print(f'   ⚠️ 未发现旧 SN 特征码 (Found: {signature})，跳过擦除以策安全。')
+          # 1. 准备 MAC 字节
+          mac_clean = target_mac.replace(':', '')
+          if len(mac_clean) != 12:
+              print('❌ 错误: MAC 地址长度不对')
+              sys.exit(1)
+              
+          mac_bytes = bytes.fromhex(mac_clean)
+          
+          # 2. 计算校验码 (单字节整数)
+          mac_chk = calc_mac_checksum_byte(mac_clean)
+          print(f'   MAC Checksum: {hex(mac_chk)}')
+          
+          # 3. 写入: [MAC 6bytes] + [CheckSum 1byte]
+          for i in range(6):
+              data[HIDDEN_MAC_OFFSET + i] = mac_bytes[i]
+          
+          data[HIDDEN_MAC_OFFSET + 6] = mac_chk
+          
+          # 清理后面可能的残留 (虽然通常是0)
+          data[HIDDEN_MAC_OFFSET + 7] = 0
+          print('   ✅ 隐形 MAC + 校验码 写入完成。')
 
-          # --- 步骤 3: 注入新身份到标准 Env ---
-          print('💉 正在注入新身份到 U-Boot 环境变量...')
-          raw_env = data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE]
+          # ==========================================
+          # 任务 2: 写入隐形 SN 区 (字符串 + 十进制校验)
+          # ==========================================
+          print(f'🔧 修改隐形 SN 区 ({hex(HIDDEN_SN_OFFSET)})...')
           
+          # 1. 计算校验码 (十进制字符串)
+          sn_chk_str = calc_sn_checksum_dec(target_sn)
+          print(f'   SN Checksum (Dec): {sn_chk_str}')
+          
+          # 2. 构造字符串: SN={SN},CHK={DEC}
+          # 注意：底包原本是 ,CHK=713。为了兼容，我们使用 ,CHK={DEC}
+          new_hidden_sn = f'SN={target_sn},CHK={sn_chk_str}'
+          new_sn_bytes = new_hidden_sn.encode('utf-8')
+          
+          print(f'   写入字串: {new_hidden_sn}')
+          
+          # 3. 写入覆盖
+          for i, b in enumerate(new_sn_bytes):
+              data[HIDDEN_SN_OFFSET + i] = b
+          
+          # 截断
+          data[HIDDEN_SN_OFFSET + len(new_sn_bytes)] = 0
+          print('   ✅ 隐形 SN + 校验码 写入完成。')
+
+          # ==========================================
+          # 任务 3: 修改 U-Boot 环境变量
+          # ==========================================
+          print('🔧 修改 U-Boot 环境变量...')
+          raw_env = data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE]
           env_dict = {}
           current_str = b''
           for byte in raw_env:
@@ -107,55 +158,37 @@ jobs:
               else:
                   current_str += bytes([byte])
 
-          # 强制写入变量
           env_dict[b'ethaddr'] = target_mac.encode('utf-8')
-          
-          if target_sn:
-              env_dict[b'sn'] = target_sn.encode('utf-8')
-              env_dict[b'serialnet'] = target_sn.encode('utf-8')
+          env_dict[b'sn'] = target_sn.encode('utf-8')
+          # 移除旧的 serialnet 防止干扰
+          if b'serialnet' in env_dict:
+              del env_dict[b'serialnet']
 
-          # 重组数据
           new_env_list = []
           for k, v in env_dict.items():
               new_env_list.append(k + b'=' + v)
-          
           new_env_data = b'\0'.join(new_env_list) + b'\0\0'
           
-          # --- 安全检查 2: 空间溢出检查 ---
           padding_len = (ENV_SIZE - 4) - len(new_env_data)
           if padding_len < 0:
-              print(f'❌ 致命错误: 环境变量溢出! 超出 {abs(padding_len)} 字节。')
+              print(f'❌ 错误: 环境变量溢出！')
               sys.exit(1)
           
           final_payload = new_env_data + (b'\0' * padding_len)
-          
-          # 计算 CRC
           new_crc = zlib.crc32(final_payload) & 0xffffffff
-          print(f'   CRC32 校验: {hex(new_crc)}')
           
-          # 写入内存
           data[ENV_OFFSET : ENV_OFFSET+4] = struct.pack('<I', new_crc)
           data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE] = final_payload
 
-          # --- 安全检查 3: 内核完整性终检 (The Final Guard) ---
-          print('🛡️ 执行最终内核完整性扫描...')
-          kernel_magic = data[KERNEL_OFFSET:KERNEL_OFFSET+4].hex()
-          print(f'   内核头特征码: {kernel_magic}')
-          
-          # 允许 LZMA (5d000080) 或 uImage (27051956)
-          if kernel_magic != '5d000080' and kernel_magic != '27051956':
-              print(f'❌ 致命错误: 内核头已损坏！生成终止。')
-              sys.exit(1)
-          else:
-              print('   ✅ 内核完好无损。')
+          # 安全检查
+          if data[KERNEL_OFFSET:KERNEL_OFFSET+4].hex() not in ['5d000080', '27051956']:
+               print('❌ 错误: 内核头损坏')
+               sys.exit(1)
 
-          # 4. 保存文件
           with open(OUT_BIN, 'wb') as f:
               f.write(data)
           
           print(f'🎉 固件生成成功: {OUT_BIN}')
-          
-          # 传递文件名给下一步
           with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
               fh.write(f'filename={OUT_BIN}\n')
           "
