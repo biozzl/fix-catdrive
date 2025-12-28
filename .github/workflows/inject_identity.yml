@@ -30,9 +30,10 @@ jobs:
             echo "❌ 错误: 仓库根目录下找不到底包 hybrid_ultimate_fix_safe.bin"
             exit 1
           fi
+          echo "✅ 底包就绪，准备生产..."
 
       - name: Run Injection Script
-        id: run_script
+        id: run_script  # 关键ID，确保Artifact上传正常
         env:
           INPUT_MAC: ${{ github.event.inputs.mac_address }}
           INPUT_SN: ${{ github.event.inputs.sn_number }}
@@ -43,42 +44,55 @@ jobs:
           import sys
           import os
 
+          # --- 核心配置 ---
           BASE_BIN = 'hybrid_ultimate_fix_safe.bin'
-          mac_suffix = os.environ['INPUT_MAC'].replace(':', '')[-4:]
+          
+          # 文件名生成逻辑
+          mac_input = os.environ.get('INPUT_MAC', '').strip().replace(':', '')
+          mac_suffix = mac_input[-4:] if len(mac_input) >=4 else 'xxxx'
           OUT_BIN = f'catdrive_patch_{mac_suffix}.bin'
           
-          # 标准 Env 区域
+          # 内存布局常量 (绝对不能错)
           ENV_OFFSET = 0xD0000
-          ENV_SIZE = 0x5000
-
-          # 隐藏 SN 的位置 (根据刚才的扫描结果)
+          ENV_SIZE = 0x5000        # 20KB (严格限制)
+          KERNEL_OFFSET = 0xD5000  # 内核绝对起始位置
+          
+          # 隐藏 SN 的位置 (基于 hybrid_custom_mac_sn.bin 扫描结果)
           HIDDEN_SN_OFFSET = 0x7eb020
-          HIDDEN_SN_LEN = len('SN=1910Q2N321313')
-
+          
           # 获取输入并转大写
           target_mac = os.environ.get('INPUT_MAC', '').strip().upper()
           target_sn = os.environ.get('INPUT_SN', '').strip().upper()
 
-          print(f'🏭 正在生产固件...')
+          print(f'🏭 启动固件生产线...')
           print(f'   底包: {BASE_BIN}')
+          print(f'   目标 MAC: {target_mac}')
           print(f'   目标 SN : {target_sn}')
 
+          # 1. 读取底包
           with open(BASE_BIN, 'rb') as f:
               data = bytearray(f.read())
 
-          # --- 步骤 1: 处理隐藏的旧 SN ---
-          # 我们把旧 SN 覆盖成空字符或注释掉，确保系统读不到它
-          print(f'🧹 清理隐藏的旧 SN (Offset: {hex(HIDDEN_SN_OFFSET)})...')
-          # 检查那个位置是不是真的是 SN (防止误伤)
-          if data[HIDDEN_SN_OFFSET:HIDDEN_SN_OFFSET+3] == b'SN=':
-              # 用 0x00 填充覆盖
-              for i in range(HIDDEN_SN_LEN):
-                  data[HIDDEN_SN_OFFSET + i] = 0
-              print('   ✅ 已抹除旧 SN 痕迹。')
-          else:
-              print('   ⚠️ 未在该位置发现旧 SN，跳过清理。')
+          # --- 安全检查 1: 底包完整性 ---
+          if len(data) != 8388608:
+              print('❌ 致命错误: 底包大小不是 8MB！停止操作。')
+              sys.exit(1)
 
-          # --- 步骤 2: 在标准位置注入新身份 ---
+          # --- 步骤 2: 清理隐藏的旧 SN ---
+          print(f'🧹 正在检查隐藏区域 ({hex(HIDDEN_SN_OFFSET)})...')
+          # 读取该位置的前3个字节
+          signature = data[HIDDEN_SN_OFFSET:HIDDEN_SN_OFFSET+3]
+          
+          if signature == b'SN=' or signature == b'sn=':
+              # 找到特征码，执行擦除 (擦除16字节，足够覆盖 1910Q2N321313)
+              for i in range(16):
+                  data[HIDDEN_SN_OFFSET + i] = 0
+              print('   ✅ 发现旧 SN，已执行物理擦除 (Zero-out)。')
+          else:
+              print(f'   ⚠️ 未发现旧 SN 特征码 (Found: {signature})，跳过擦除以策安全。')
+
+          # --- 步骤 3: 注入新身份到标准 Env ---
+          print('💉 正在注入新身份到 U-Boot 环境变量...')
           raw_env = data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE]
           
           env_dict = {}
@@ -93,34 +107,55 @@ jobs:
               else:
                   current_str += bytes([byte])
 
+          # 强制写入变量
           env_dict[b'ethaddr'] = target_mac.encode('utf-8')
           
           if target_sn:
               env_dict[b'sn'] = target_sn.encode('utf-8')
               env_dict[b'serialnet'] = target_sn.encode('utf-8')
 
+          # 重组数据
           new_env_list = []
           for k, v in env_dict.items():
               new_env_list.append(k + b'=' + v)
           
           new_env_data = b'\0'.join(new_env_list) + b'\0\0'
           
+          # --- 安全检查 2: 空间溢出检查 ---
           padding_len = (ENV_SIZE - 4) - len(new_env_data)
           if padding_len < 0:
-              print(f'❌ 错误: 环境变量溢出！')
+              print(f'❌ 致命错误: 环境变量溢出! 超出 {abs(padding_len)} 字节。')
               sys.exit(1)
           
           final_payload = new_env_data + (b'\0' * padding_len)
-          new_crc = zlib.crc32(final_payload) & 0xffffffff
           
+          # 计算 CRC
+          new_crc = zlib.crc32(final_payload) & 0xffffffff
+          print(f'   CRC32 校验: {hex(new_crc)}')
+          
+          # 写入内存
           data[ENV_OFFSET : ENV_OFFSET+4] = struct.pack('<I', new_crc)
           data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE] = final_payload
 
+          # --- 安全检查 3: 内核完整性终检 (The Final Guard) ---
+          print('🛡️ 执行最终内核完整性扫描...')
+          kernel_magic = data[KERNEL_OFFSET:KERNEL_OFFSET+4].hex()
+          print(f'   内核头特征码: {kernel_magic}')
+          
+          # 允许 LZMA (5d000080) 或 uImage (27051956)
+          if kernel_magic != '5d000080' and kernel_magic != '27051956':
+              print(f'❌ 致命错误: 内核头已损坏！生成终止。')
+              sys.exit(1)
+          else:
+              print('   ✅ 内核完好无损。')
+
+          # 4. 保存文件
           with open(OUT_BIN, 'wb') as f:
               f.write(data)
           
           print(f'🎉 固件生成成功: {OUT_BIN}')
           
+          # 传递文件名给下一步
           with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
               fh.write(f'filename={OUT_BIN}\n')
           "
