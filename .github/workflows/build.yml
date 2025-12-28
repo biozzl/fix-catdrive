@@ -7,10 +7,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
@@ -59,7 +59,6 @@ jobs:
           src_vars = extract_env_vars(src_data)
           
           # 2. 提取关键逻辑 'preboot'
-          # 这就是你要的“解锁”代码
           if b'preboot' in src_vars:
               target_logic = src_vars[b'preboot']
               print(f'Found hardware logic in Source: {target_logic}')
@@ -73,10 +72,8 @@ jobs:
               dst_data = bytearray(f.read())
 
           # 4. 构造新的环境变量块
-          # 先获取目标文件的所有现有变量
           dst_vars = extract_env_vars(dst_data)
           
-          # 强行植入源文件的逻辑
           print('Transplanting logic...')
           dst_vars[b'preboot'] = target_logic
 
@@ -95,14 +92,12 @@ jobs:
           
           final_payload = new_env_data + (b'\0' * padding_len)
 
-          # 5. 计算 CRC32 (关键步骤，否则变砖)
+          # 5. 计算 CRC32
           new_crc = zlib.crc32(final_payload) & 0xffffffff
           print(f'New CRC32: {hex(new_crc)}')
 
           # 6. 写入文件
-          # 写入 CRC (小端序)
           dst_data[ENV_OFFSET : ENV_OFFSET+4] = struct.pack('<I', new_crc)
-          # 写入数据
           dst_data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE] = final_payload
 
           with open(OUT_BIN, 'wb') as f:
@@ -111,7 +106,7 @@ jobs:
           "
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4  # 这里修正为 V4
         with:
           name: patched-firmware
           path: hybrid_fixed_0x46.bin
