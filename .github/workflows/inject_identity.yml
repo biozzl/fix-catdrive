@@ -8,7 +8,7 @@ on:
         required: true
         default: '00:11:32:XX:XX:XX'
       sn_number:
-        description: '输入目标 SN 序列号 (可选)'
+        description: '输入目标 SN 序列号 (大小写均可，自动转大写)'
         required: false
         default: ''
 
@@ -33,7 +33,7 @@ jobs:
           echo "✅ 底包就绪，准备生产..."
 
       - name: Run Injection Script
-        id: run_script  # <--- 【关键修复】就是加了这一行！
+        id: run_script
         env:
           INPUT_MAC: ${{ github.event.inputs.mac_address }}
           INPUT_SN: ${{ github.event.inputs.sn_number }}
@@ -53,13 +53,14 @@ jobs:
           ENV_OFFSET = 0xD0000
           ENV_SIZE = 0x5000  # 20KB 安全限制
 
-          # 获取输入
+          # --- 获取输入并强制转大写 (Force Uppercase) ---
           target_mac = os.environ.get('INPUT_MAC', '').strip().upper()
-          target_sn = os.environ.get('INPUT_SN', '').strip()
+          target_sn = os.environ.get('INPUT_SN', '').strip().upper()  # <--- 这里加上了 .upper()
 
           print(f'🏭 正在生产固件...')
           print(f'   底包: {BASE_BIN}')
           print(f'   目标 MAC: {target_mac}')
+          print(f'   目标 SN : {target_sn}')
 
           # 1. 读取底包
           with open(BASE_BIN, 'rb') as f:
@@ -81,7 +82,7 @@ jobs:
               else:
                   current_str += bytes([byte])
 
-          # 4. 修改身份信息
+          # 4. 修改身份信息 (写入大写值)
           env_dict[b'ethaddr'] = target_mac.encode('utf-8')
           
           if target_sn:
@@ -95,6 +96,7 @@ jobs:
           
           new_env_data = b'\0'.join(new_env_list) + b'\0\0'
           
+          # 检查溢出
           padding_len = (ENV_SIZE - 4) - len(new_env_data)
           if padding_len < 0:
               print(f'❌ 错误: 环境变量溢出！')
@@ -124,6 +126,5 @@ jobs:
       - name: Upload Custom Firmware
         uses: actions/upload-artifact@v4
         with:
-          # 现在这里能正确引用到上一步的 filename 了
           name: ${{ steps.run_script.outputs.filename }}
           path: catdrive_patch_*.bin
