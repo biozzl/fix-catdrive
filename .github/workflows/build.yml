@@ -1,36 +1,117 @@
-name: Run Custom Identity Script
+name: Patch Catdrive U-Boot Env
 
-on: 
-  workflow_dispatch: # 允许手动点击按钮触发
+on: [push, workflow_dispatch]
 
 jobs:
-  build:
+  patch-firmware:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.x'
 
-      - name: Check Files
+      - name: Verify Files Exist
         run: |
-          ls -l
-          # --- 修正点：检查 V8 脚本需要的原料 ---
-          if [ ! -f "hybrid_ultimate.bin" ]; then echo "Error: hybrid_ultimate.bin not found! Please upload it."; exit 1; fi
-          # 检查脚本是否存在
-          if [ ! -f "custom_identity.py" ]; then echo "Error: custom_identity.py not found!"; exit 1; fi
+          if [ ! -f "623.8.1.bin" ]; then echo "Error: 623.8.1.bin not found!"; exit 1; fi
+          if [ ! -f "hybrid_custom_mac_sn.bin" ]; then echo "Error: hybrid_custom_mac_sn.bin not found!"; exit 1; fi
+          echo "Files found. Proceeding..."
 
-      - name: Run Hybrid Script
-        # 运行 V8 脚本
-        run: python custom_identity.py
+      - name: Run Patch Script
+        run: |
+          python3 -c "
+          import struct
+          import zlib
+          import sys
 
-      - name: Upload Hybrid Firmware
-        uses: actions/upload-artifact@v4
+          # --- 配置 ---
+          SRC_BIN = '623.8.1.bin'       # 提供逻辑的源文件 (含有0x46代码)
+          DST_BIN = 'hybrid_custom_mac_sn.bin' # 需要修复的目标文件
+          OUT_BIN = 'hybrid_fixed_0x46.bin'
+          
+          ENV_OFFSET = 0xD0000          # 猫盘标准 Env 偏移量
+          ENV_SIZE = 0x10000            # 64KB
+
+          def extract_env_vars(data):
+              # 跳过前4字节CRC
+              raw_env = data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE]
+              vars_dict = {}
+              current_str = b''
+              for byte in raw_env:
+                  if byte == 0:
+                      if not current_str: break # 双null结束
+                      if b'=' in current_str:
+                          key, val = current_str.split(b'=', 1)
+                          vars_dict[key] = val
+                      current_str = b''
+                  else:
+                      current_str += bytes([byte])
+              return vars_dict
+
+          # 1. 读取源文件 (623)
+          print(f'Reading Source: {SRC_BIN}')
+          with open(SRC_BIN, 'rb') as f:
+              src_data = f.read()
+          
+          src_vars = extract_env_vars(src_data)
+          
+          # 2. 提取关键逻辑 'preboot'
+          # 这就是你要的“解锁”代码
+          if b'preboot' in src_vars:
+              target_logic = src_vars[b'preboot']
+              print(f'Found hardware logic in Source: {target_logic}')
+          else:
+              print('ERROR: Source binary does not contain preboot logic!')
+              sys.exit(1)
+
+          # 3. 读取目标文件 (Hybrid)
+          print(f'Reading Target: {DST_BIN}')
+          with open(DST_BIN, 'rb') as f:
+              dst_data = bytearray(f.read())
+
+          # 4. 构造新的环境变量块
+          # 先获取目标文件的所有现有变量
+          dst_vars = extract_env_vars(dst_data)
+          
+          # 强行植入源文件的逻辑
+          print('Transplanting logic...')
+          dst_vars[b'preboot'] = target_logic
+
+          # 重新打包
+          new_env_list = []
+          for k, v in dst_vars.items():
+              new_env_list.append(k + b'=' + v)
+          
+          new_env_data = b'\0'.join(new_env_list) + b'\0\0'
+          
+          # 填充 0x00
+          padding_len = (ENV_SIZE - 4) - len(new_env_data)
+          if padding_len < 0:
+              print('ERROR: Environment size overflow!')
+              sys.exit(1)
+          
+          final_payload = new_env_data + (b'\0' * padding_len)
+
+          # 5. 计算 CRC32 (关键步骤，否则变砖)
+          new_crc = zlib.crc32(final_payload) & 0xffffffff
+          print(f'New CRC32: {hex(new_crc)}')
+
+          # 6. 写入文件
+          # 写入 CRC (小端序)
+          dst_data[ENV_OFFSET : ENV_OFFSET+4] = struct.pack('<I', new_crc)
+          # 写入数据
+          dst_data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE] = final_payload
+
+          with open(OUT_BIN, 'wb') as f:
+              f.write(dst_data)
+          print(f'SUCCESS: Generated {OUT_BIN}')
+          "
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
         with:
-          name: Hybrid-V8-Final
-          # --- 关键点：这里必须和 V8 脚本里的 output_file 一致 ---
-          path: hybrid_v8_final.bin 
-          compression-level: 0
+          name: patched-firmware
+          path: hybrid_fixed_0x46.bin
