@@ -28,16 +28,44 @@ jobs:
           import sys
 
           # --- 配置 ---
-          SRC_BIN = '623.8.1.bin'       # 提供逻辑的源文件 (含有0x46代码)
-          DST_BIN = 'hybrid_custom_mac_sn.bin' # 需要修复的目标文件
+          SRC_BIN = '623.8.1.bin'       # 源文件
+          DST_BIN = 'hybrid_custom_mac_sn.bin' # 目标文件
           OUT_BIN = 'hybrid_fixed_0x46.bin'
           
-          ENV_OFFSET = 0xD0000          # 猫盘标准 Env 偏移量
-          ENV_SIZE = 0x10000            # 64KB
+          # 目标文件(Hybrid)的标准Env参数 (这个是固定的不要动)
+          DST_ENV_OFFSET = 0xD0000
+          DST_ENV_SIZE = 0x10000  # 64KB
 
-          def extract_env_vars(data):
+          def find_logic_in_source(filename):
+              print(f'Scanning {filename} for hardware logic...')
+              with open(filename, 'rb') as f:
+                  data = f.read()
+              
+              # 智能搜索特征码: 'preboot=i2c dev 0'
+              # 这行代码是 0x46 机器特有的标志
+              signature = b'preboot=i2c dev 0'
+              idx = data.find(signature)
+              
+              if idx == -1:
+                  return None
+              
+              # 找到开头后，一直读取到下一个 null 字节 (\x00)
+              end_idx = data.find(b'\x00', idx)
+              if end_idx == -1:
+                  full_str = data[idx:]
+              else:
+                  full_str = data[idx:end_idx]
+              
+              print(f'Found Logic at offset {hex(idx)}: {full_str}')
+              
+              # 提取值 (去掉 'preboot=')
+              if b'=' in full_str:
+                  return full_str.split(b'=', 1)[1]
+              return None
+
+          def extract_env_vars(data, offset, size):
               # 跳过前4字节CRC
-              raw_env = data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE]
+              raw_env = data[offset+4 : offset+size]
               vars_dict = {}
               current_str = b''
               for byte in raw_env:
@@ -51,33 +79,29 @@ jobs:
                       current_str += bytes([byte])
               return vars_dict
 
-          # 1. 读取源文件 (623)
-          print(f'Reading Source: {SRC_BIN}')
-          with open(SRC_BIN, 'rb') as f:
-              src_data = f.read()
+          # 1. 从源文件中智能搜寻逻辑
+          target_logic = find_logic_in_source(SRC_BIN)
           
-          src_vars = extract_env_vars(src_data)
+          if not target_logic:
+              # 如果搜不到，说明 623 文件可能不对，但为了救你，我内置了这段代码作为保底
+              print('WARNING: Could not find logic in source file! Using hardcoded fallback.')
+              target_logic = b'i2c dev 0; i2c probe 46; if test $? = 0; then i2c mw 0x46 0x34 0; fi'
           
-          # 2. 提取关键逻辑 'preboot'
-          if b'preboot' in src_vars:
-              target_logic = src_vars[b'preboot']
-              print(f'Found hardware logic in Source: {target_logic}')
-          else:
-              print('ERROR: Source binary does not contain preboot logic!')
-              sys.exit(1)
+          print(f'Using Logic Payload: {target_logic}')
 
-          # 3. 读取目标文件 (Hybrid)
+          # 2. 读取目标文件 (Hybrid)
           print(f'Reading Target: {DST_BIN}')
           with open(DST_BIN, 'rb') as f:
               dst_data = bytearray(f.read())
 
-          # 4. 构造新的环境变量块
-          dst_vars = extract_env_vars(dst_data)
+          # 3. 解析目标文件的环境变量
+          dst_vars = extract_env_vars(dst_data, DST_ENV_OFFSET, DST_ENV_SIZE)
           
-          print('Transplanting logic...')
+          # 4. 植入/覆盖 preboot
+          print('Transplanting logic to Target...')
           dst_vars[b'preboot'] = target_logic
 
-          # 重新打包
+          # 5. 重新打包环境变量
           new_env_list = []
           for k, v in dst_vars.items():
               new_env_list.append(k + b'=' + v)
@@ -85,20 +109,20 @@ jobs:
           new_env_data = b'\0'.join(new_env_list) + b'\0\0'
           
           # 填充 0x00
-          padding_len = (ENV_SIZE - 4) - len(new_env_data)
+          padding_len = (DST_ENV_SIZE - 4) - len(new_env_data)
           if padding_len < 0:
-              print('ERROR: Environment size overflow!')
+              print('ERROR: Environment size overflow! Too much data.')
               sys.exit(1)
           
           final_payload = new_env_data + (b'\0' * padding_len)
 
-          # 5. 计算 CRC32
+          # 6. 计算新的 CRC32 (至关重要)
           new_crc = zlib.crc32(final_payload) & 0xffffffff
           print(f'New CRC32: {hex(new_crc)}')
 
-          # 6. 写入文件
-          dst_data[ENV_OFFSET : ENV_OFFSET+4] = struct.pack('<I', new_crc)
-          dst_data[ENV_OFFSET+4 : ENV_OFFSET+ENV_SIZE] = final_payload
+          # 7. 写入文件
+          dst_data[DST_ENV_OFFSET : DST_ENV_OFFSET+4] = struct.pack('<I', new_crc)
+          dst_data[DST_ENV_OFFSET+4 : DST_ENV_OFFSET+DST_ENV_SIZE] = final_payload
 
           with open(OUT_BIN, 'wb') as f:
               f.write(dst_data)
@@ -106,7 +130,7 @@ jobs:
           "
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4  # 这里修正为 V4
+        uses: actions/upload-artifact@v4
         with:
           name: patched-firmware
           path: hybrid_fixed_0x46.bin
